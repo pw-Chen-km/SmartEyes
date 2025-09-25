@@ -24,6 +24,9 @@ Key files:
    - Emits events via callback: status heartbeat, precheck_passed, vlm_decision
    - Writes debugging artifacts under `outputs/<stream_id>/k_img/`; optionally writes video under `outputs/<stream_id>/video/`
 
+4) Optional: Negative ROI (Exclusion Zone)
+   - Besides the main ROI, you can provide a negative ROI polygon. If, after K1 is captured and before K2 is sampled, the tracked subject overlaps the negative ROI above a threshold, the current event is cancelled (state resets to idle and no VLM dispatch for that event).
+
 ---
 
 ### Quick Start (Minimal Code)
@@ -37,6 +40,9 @@ cfg = PipelineConfig(
     input_path="",                      # ignored in streaming mode
     output_dir="/tmp/outputs",
     roi_poly_norm=[(0.2,0.4),(0.8,0.4),(0.8,0.95),(0.2,0.95)],  # QUICK ROI (normalized)
+    # Optional negative ROI (exclusion zone): cancel event if overlapped between K1 and K2
+    # neg_roi_poly_norm=[(0.0,0.0),(1.0,0.0),(1.0,0.20),(0.0,0.20)],
+    # neg_iou_threshold=0.0,
     points=[], labels=[],                # no SAM when roi_poly_norm is set
     trigger_frames=5,
     crop_k2=True, draw_sam=False,
@@ -176,6 +182,8 @@ ROI/Masking
 - `roi_poly_norm`: list[(x_norm, y_norm)], normalized polygon; if set (>=3 points), SAM is skipped
 - `points`, `labels`: SAM prompts (pixels); used only when `roi_poly_norm` is None; 1=positive, 0=negative
 - `draw_sam`: overlay the initial SAM mask on outputs (for debugging)
+ - `neg_roi_poly_norm`: secondary polygon acting as an exclusion zone (normalized). If overlapped after K1 and before K2, the event is cancelled
+ - `neg_iou_threshold`: overlap threshold against the negative ROI (relative to bbox)
 
 Triggering & Precheck
 - `iou_threshold`: overlap threshold between detection and ROI (start with 0.0)

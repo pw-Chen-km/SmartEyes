@@ -72,6 +72,9 @@ class StreamingPipeline:
         # 初始 SAM 遮罩
         self._initial_sam_mask_bin: Optional[np.ndarray] = None
         self.use_fixed_roi_mask: bool = bool(self.cfg.roi_poly_norm and len(self.cfg.roi_poly_norm) >= 3)
+        # 負向 ROI 遮罩
+        self._neg_roi_mask_bin: Optional[np.ndarray] = None
+        self.use_fixed_neg_roi_mask: bool = bool(getattr(self.cfg, "neg_roi_poly_norm", None) and len(self.cfg.neg_roi_poly_norm or []) >= 3)
 
         # 事件與 UI 回呼
         self._ui_event_cb: Optional[Callable[[Dict[str, Any]], None]] = None
@@ -100,7 +103,11 @@ class StreamingPipeline:
         self._stem: str = "stream"
 
         # 單幀狀態機
-        self._trigger = InteractionTrigger(iou_threshold=self.cfg.iou_threshold, consecutive_frames=self.cfg.trigger_frames)
+        self._trigger = InteractionTrigger(
+            iou_threshold=self.cfg.iou_threshold,
+            consecutive_frames=self.cfg.trigger_frames,
+            neg_iou_threshold=float(getattr(self.cfg, "neg_iou_threshold", 0.0)),
+        )
         self._state: str = "idle"
         self._contact_active: bool = False
         self._kbuf = ReasoningKeyframeBuffer()
@@ -194,9 +201,21 @@ class StreamingPipeline:
                     max_overlap = ov
                     best_poly = poly
 
+        # 計算負向 ROI overlap（若有）
+        neg_overlap = 0.0
+        if self.use_fixed_neg_roi_mask and isinstance(self._neg_roi_mask_bin, np.ndarray) and r is not None:
+            try:
+                poly_list = polys if polys is not None else yolo_polys_from_result(r)
+                for poly in poly_list:
+                    ov2 = overlap_ratio_poly_with_mask(poly, self._neg_roi_mask_bin, width, height)
+                    if ov2 > neg_overlap:
+                        neg_overlap = ov2
+            except Exception:
+                neg_overlap = 0.0
+
         # 觸發器
         event_flag = self._trigger.update(max_overlap)
-        self._step_state_machine(event_flag, frame_bgr, annotated_bgr, width, height, sam_bin, best_poly, polys, ts_ms)
+        self._step_state_machine(event_flag, frame_bgr, annotated_bgr, width, height, sam_bin, best_poly, polys, ts_ms, neg_overlap)
 
         # 覆繪與寫檔
         out_text = self.current_vlm_text or ""
@@ -314,6 +333,28 @@ class StreamingPipeline:
                 else:
                     LOGGER.warning("roi_poly_norm has <3 points; fallback to SAM")
                     self.use_fixed_roi_mask = False
+            # 構建負向 ROI 遮罩（若有）
+            if self.use_fixed_neg_roi_mask and getattr(self.cfg, "neg_roi_poly_norm", None) is not None:
+                try:
+                    poly_px2: List[Tuple[int, int]] = []
+                    for xn, yn in (self.cfg.neg_roi_poly_norm or []):
+                        x = int(round(float(xn) * float(width)))
+                        y = int(round(float(yn) * float(height)))
+                        x = max(0, min(width - 1, x))
+                        y = max(0, min(height - 1, y))
+                        poly_px2.append((x, y))
+                    mask1 = np.zeros((height, width), dtype=np.uint8)
+                    if len(poly_px2) >= 3:
+                        pts2 = np.array(poly_px2, dtype=np.int32).reshape((-1, 1, 2))
+                        cv2.fillPoly(mask1, [pts2], 255)
+                        self._neg_roi_mask_bin = (mask1 > 0).astype(np.uint8)
+                        LOGGER.info("using fixed NEG-ROI polygon mask with %d points", len(poly_px2))
+                    else:
+                        self._neg_roi_mask_bin = None
+                        self.use_fixed_neg_roi_mask = False
+                except Exception:
+                    self._neg_roi_mask_bin = None
+                    self.use_fixed_neg_roi_mask = False
             if not self.use_fixed_roi_mask and self.orch is not None:
                 if len(self.cfg.points) > 0:
                     self.orch.set_sam_prompts(points=self.cfg.points, labels=(self.cfg.labels or [1] * len(self.cfg.points)), roi_box=None)
@@ -490,7 +531,7 @@ class StreamingPipeline:
         )
 
     # --- 內部：狀態機步進 ---
-    def _step_state_machine(self, event_flag: bool, frame_bgr: np.ndarray, annotated_bgr: Optional[np.ndarray], width: int, height: int, sam_bin: Optional[np.ndarray], best_poly: Optional[np.ndarray], polys: Optional[List[np.ndarray]], ts_ms: float) -> None:
+    def _step_state_machine(self, event_flag: bool, frame_bgr: np.ndarray, annotated_bgr: Optional[np.ndarray], width: int, height: int, sam_bin: Optional[np.ndarray], best_poly: Optional[np.ndarray], polys: Optional[List[np.ndarray]], ts_ms: float, neg_overlap: float) -> None:
         # idle -> contacting
         if self._state == "idle":
             if event_flag and not self._contact_active:
@@ -502,6 +543,21 @@ class StreamingPipeline:
 
         # contacting：收 k1，等待離開
         if self._state == "contacting":
+            # 若負向 ROI 觸發，取消事件
+            try:
+                if self._trigger.is_negative_violated(neg_overlap):
+                    self._kbuf.reset()
+                    self._state = "idle"
+                    self._contact_active = False
+                    self._k1_collected = False
+                    self._trigger.reset()
+                    self._person_missing_frames = 0
+                    self._k2_sample_count = 0
+                    self._k2_crop_box = None
+                    self._current_event_index += 1
+                    return
+            except Exception:
+                pass
             if not self._k1_collected:
                 frame_with_sam = frame_bgr
                 if sam_bin is not None:
@@ -577,6 +633,21 @@ class StreamingPipeline:
 
         # post_leaving：取 k2 樣本幀
         if self._state == "post_leaving":
+            # 在 K2 取樣前，若負向 ROI 觸發則取消事件
+            try:
+                if self._trigger.is_negative_violated(neg_overlap):
+                    self._kbuf.reset()
+                    self._state = "idle"
+                    self._contact_active = False
+                    self._k1_collected = False
+                    self._trigger.reset()
+                    self._person_missing_frames = 0
+                    self._k2_sample_count = 0
+                    self._k2_crop_box = None
+                    self._current_event_index += 1
+                    return
+            except Exception:
+                pass
             # 修正非法取樣幀位，至少從第 1 幀開始
             try:
                 self._k2_sample_frames = [max(1, int(n)) for n in (self._k2_sample_frames or [1, 2])]

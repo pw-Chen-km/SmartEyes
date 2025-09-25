@@ -59,6 +59,9 @@ class PipelineConfig:
     mask_mode: str = "keep"
     draw_sam: bool = False
     roi_poly_norm: Optional[List[Tuple[float, float]]] = None
+    # 負向 ROI：若在 K1 之後到 K2 之前與負向 ROI 有重疊，則取消此次事件
+    neg_roi_poly_norm: Optional[List[Tuple[float, float]]] = None
+    neg_iou_threshold: float = 0.0
     # K1/K2 前置檢查（以 VLM 單張判斷手是否進入/離開 ROI）
     precheck_enabled: bool = True
     # Precheck 影像裁切相對於 dispatch 放大比例（例如 1.2 表示放大 20%）
@@ -82,6 +85,7 @@ class VisualMonitoringPipeline:
         # 初始 SAM 遮罩
         self._initial_sam_mask_bin: Optional[np.ndarray] = None
         self.use_fixed_roi_mask: bool = bool(self.cfg.roi_poly_norm and len(self.cfg.roi_poly_norm) >= 3)
+        self.use_fixed_neg_roi_mask: bool = bool(self.cfg.neg_roi_poly_norm and len(self.cfg.neg_roi_poly_norm) >= 3)
 
         # UI 事件回呼（事件級更新）
         self._ui_event_cb: Optional[Callable[[Dict[str, Any]], None]] = None
@@ -636,7 +640,7 @@ class VisualMonitoringPipeline:
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         start_time = time.time()
 
-        trigger = InteractionTrigger(iou_threshold=self.cfg.iou_threshold, consecutive_frames=self.cfg.trigger_frames)
+        trigger = InteractionTrigger(iou_threshold=self.cfg.iou_threshold, consecutive_frames=self.cfg.trigger_frames, neg_iou_threshold=self.cfg.neg_iou_threshold)
         state = "idle"
         contact_active = False
         kbuf = ReasoningKeyframeBuffer()
@@ -711,6 +715,7 @@ class VisualMonitoringPipeline:
                             sam = cv2.resize(sam, (width, height), interpolation=cv2.INTER_NEAREST)
                         sam_bin = (sam > 0).astype(np.uint8)
 
+                # 主要 ROI 的 overlap
                 max_overlap = 0.0
                 best_poly = None
                 polys = None
@@ -722,6 +727,36 @@ class VisualMonitoringPipeline:
                             max_overlap = ov
                             best_poly = poly
 
+                # 負向 ROI 的 overlap（若提供）
+                neg_overlap = 0.0
+                if self.use_fixed_neg_roi_mask and self.cfg.neg_roi_poly_norm is not None:
+                    try:
+                        # 構建負向 ROI mask（lazy 構建：重用 _neg_roi_mask_bin）
+                        if not hasattr(self, "_neg_roi_mask_bin"):
+                            poly_px: List[Tuple[int, int]] = []
+                            for xn, yn in (self.cfg.neg_roi_poly_norm or []):
+                                x = int(round(float(xn) * float(width)))
+                                y = int(round(float(yn) * float(height)))
+                                x = max(0, min(width - 1, x))
+                                y = max(0, min(height - 1, y))
+                                poly_px.append((x, y))
+                            mask0 = np.zeros((height, width), dtype=np.uint8)
+                            if len(poly_px) >= 3:
+                                pts = np.array(poly_px, dtype=np.int32).reshape((-1, 1, 2))
+                                cv2.fillPoly(mask0, [pts], 255)
+                                setattr(self, "_neg_roi_mask_bin", (mask0 > 0).astype(np.uint8))
+                            else:
+                                setattr(self, "_neg_roi_mask_bin", None)
+                        neg_mask = getattr(self, "_neg_roi_mask_bin", None)
+                        if neg_mask is not None and r is not None:
+                            polys2 = polys if polys is not None else yolo_polys_from_result(r)
+                            for poly in polys2:
+                                ov2 = overlap_ratio_poly_with_mask(poly, neg_mask, width, height)
+                                if ov2 > neg_overlap:
+                                    neg_overlap = ov2
+                    except Exception:
+                        neg_overlap = 0.0
+
                 event = trigger.update(max_overlap)
                 if state == "idle":
                     if event and not contact_active:
@@ -729,6 +764,15 @@ class VisualMonitoringPipeline:
                         kbuf.reset()
                         state = "contacting"
                 elif state == "contacting":
+                    # 若在 contacting 階段（已收 K1 前/後）偵測到負向 ROI 觸發，取消此次事件
+                    try:
+                        if trigger.is_negative_violated(neg_overlap):
+                            kbuf.reset(); state = "idle"; contact_active = False; k1_collected = False
+                            trigger.reset(); person_missing_frames = 0; k2_sample_count = 0; k2_crop_box = None
+                            event_index += 1; self._current_event_index = event_index
+                            continue
+                    except Exception:
+                        pass
                     if not k1_collected:
                         # 先將 SAM mask 畫到 frame_bgr 上
                         frame_with_sam = frame_bgr
@@ -806,6 +850,15 @@ class VisualMonitoringPipeline:
                         state = "post_leaving"
                         post_leaving_frame_counter = 0
                 elif state == "post_leaving":
+                    # 在 K2 採樣前，如負向 ROI 被觸發，取消此次事件
+                    try:
+                        if trigger.is_negative_violated(neg_overlap):
+                            kbuf.reset(); state = "idle"; contact_active = False; k1_collected = False
+                            trigger.reset(); person_missing_frames = 0; k2_sample_count = 0; k2_crop_box = None
+                            event_index += 1; self._current_event_index = event_index
+                            continue
+                    except Exception:
+                        pass
                     post_leaving_frame_counter += 1
                     if k2_sample_count < len(k2_sample_frames) and post_leaving_frame_counter == k2_sample_frames[k2_sample_count]:
                         try:

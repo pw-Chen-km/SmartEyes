@@ -3,8 +3,9 @@ import numpy as np
 
 
 class InteractionTrigger:
-    def __init__(self, iou_threshold: float = 0.0, consecutive_frames: int = 10) -> None:
+    def __init__(self, iou_threshold: float = 0.0, consecutive_frames: int = 10, neg_iou_threshold: float = 0.0) -> None:
         self.iou_threshold = iou_threshold
+        self.neg_iou_threshold = float(neg_iou_threshold)
         self.consecutive_frames = max(1, int(consecutive_frames))
         self._last_iou: Optional[float] = None
         self._consecutive_count: int = 0
@@ -98,3 +99,12 @@ class InteractionTrigger:
             self.consecutive_frames = max(1, int(n))
         except Exception:
             self.consecutive_frames = 10
+
+    # 檢查負向 ROI 是否被觸發（僅用於管線在 K1 之後到 K2 之前取消事件用）
+    def is_negative_violated(self, neg_iou: Optional[float]) -> bool:
+        try:
+            if neg_iou is None:
+                return False
+            return float(neg_iou) > float(self.neg_iou_threshold)
+        except Exception:
+            return False
