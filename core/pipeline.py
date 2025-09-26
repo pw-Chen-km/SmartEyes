@@ -595,6 +595,26 @@ class VisualMonitoringPipeline:
             cap.release(); writer.release()
             return None
         try:
+            # 若 roi_poly_norm 看起來是像素座標（任何值 > 1），在首次幀自動轉為 normalize
+            try:
+                if isinstance(self.cfg.roi_poly_norm, list) and len(self.cfg.roi_poly_norm) > 0:
+                    has_pixel_like = False
+                    for xn, yn in (self.cfg.roi_poly_norm or []):
+                        if float(xn) > 1.0 or float(yn) > 1.0:
+                            has_pixel_like = True
+                            break
+                    if has_pixel_like and width > 0 and height > 0:
+                        norm_list = []
+                        for xn, yn in (self.cfg.roi_poly_norm or []):
+                            x_norm = max(0.0, min(1.0, float(xn) / float(width)))
+                            y_norm = max(0.0, min(1.0, float(yn) / float(height)))
+                            norm_list.append((x_norm, y_norm))
+                        self.cfg.roi_poly_norm = norm_list
+                        self.use_fixed_roi_mask = bool(len(self.cfg.roi_poly_norm) >= 3)
+                        LOGGER.info("auto-normalized roi_poly_norm from pixel coordinates (%dx%d)", width, height)
+            except Exception:
+                pass
+
             if self.use_fixed_roi_mask and self.cfg.roi_poly_norm is not None:
                 try:
                     poly_px: List[Tuple[int, int]] = []
@@ -616,6 +636,51 @@ class VisualMonitoringPipeline:
                 except Exception:
                     LOGGER.exception("failed to build fixed ROI mask; fallback to SAM")
                     self.use_fixed_roi_mask = False
+            # 構建負向 ROI 遮罩（若有）：同樣支援像素自動 normalize
+            if self.use_fixed_neg_roi_mask and self.cfg.neg_roi_poly_norm is not None:
+                try:
+                    try:
+                        if isinstance(self.cfg.neg_roi_poly_norm, list) and len(self.cfg.neg_roi_poly_norm) > 0:
+                            has_pixel_like2 = False
+                            for xn, yn in (self.cfg.neg_roi_poly_norm or []):
+                                if float(xn) > 1.0 or float(yn) > 1.0:
+                                    has_pixel_like2 = True
+                                    break
+                            if has_pixel_like2 and width > 0 and height > 0:
+                                norm_list2 = []
+                                for xn, yn in (self.cfg.neg_roi_poly_norm or []):
+                                    x_norm = max(0.0, min(1.0, float(xn) / float(width)))
+                                    y_norm = max(0.0, min(1.0, float(yn) / float(height)))
+                                    norm_list2.append((x_norm, y_norm))
+                                self.cfg.neg_roi_poly_norm = norm_list2
+                                self.use_fixed_neg_roi_mask = bool(len(self.cfg.neg_roi_poly_norm) >= 3)
+                                LOGGER.info("auto-normalized neg_roi_poly_norm from pixel coordinates (%dx%d)", width, height)
+                    except Exception:
+                        pass
+
+                    # 構建負向 ROI mask（lazy 構建：一次性）
+                    if not hasattr(self, "_neg_roi_mask_bin") or getattr(self, "_neg_roi_mask_bin") is None:
+                        poly_px2: List[Tuple[int, int]] = []
+                        for xn, yn in (self.cfg.neg_roi_poly_norm or []):
+                            x = int(round(float(xn) * float(width)))
+                            y = int(round(float(yn) * float(height)))
+                            x = max(0, min(width - 1, x))
+                            y = max(0, min(height - 1, y))
+                            poly_px2.append((x, y))
+                        mask1 = np.zeros((height, width), dtype=np.uint8)
+                        if len(poly_px2) >= 3:
+                            pts2 = np.array(poly_px2, dtype=np.int32).reshape((-1, 1, 2))
+                            cv2.fillPoly(mask1, [pts2], 255)
+                            self._neg_roi_mask_bin = (mask1 > 0).astype(np.uint8)
+                            LOGGER.info("using fixed NEG-ROI polygon mask with %d points", len(poly_px2))
+                        else:
+                            self._neg_roi_mask_bin = None
+                            self.use_fixed_neg_roi_mask = False
+                except Exception:
+                    LOGGER.exception("failed to build NEG-ROI mask; disable neg mask")
+                    self._neg_roi_mask_bin = None
+                    self.use_fixed_neg_roi_mask = False
+
             if not self.use_fixed_roi_mask and self.orch is not None:
                 if len(self.cfg.points) > 0:
                     self.orch.set_sam_prompts(points=self.cfg.points, labels=(self.cfg.labels or [1] * len(self.cfg.points)), roi_box=None)

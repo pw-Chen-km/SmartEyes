@@ -316,6 +316,26 @@ class StreamingPipeline:
 
     def _prepare_roi_or_sam(self, width: int, height: int, first_bgr: np.ndarray) -> None:
         try:
+            # 若 roi_poly_norm 看起來是像素座標（任何值 > 1），在首次幀自動轉為 normalize
+            try:
+                if isinstance(self.cfg.roi_poly_norm, list) and len(self.cfg.roi_poly_norm) > 0:
+                    has_pixel_like = False
+                    for xn, yn in (self.cfg.roi_poly_norm or []):
+                        if float(xn) > 1.0 or float(yn) > 1.0:
+                            has_pixel_like = True
+                            break
+                    if has_pixel_like and width > 0 and height > 0:
+                        norm_list = []
+                        for xn, yn in (self.cfg.roi_poly_norm or []):
+                            x_norm = max(0.0, min(1.0, float(xn) / float(width)))
+                            y_norm = max(0.0, min(1.0, float(yn) / float(height)))
+                            norm_list.append((x_norm, y_norm))
+                        self.cfg.roi_poly_norm = norm_list
+                        self.use_fixed_roi_mask = bool(len(self.cfg.roi_poly_norm) >= 3)
+                        LOGGER.info("auto-normalized roi_poly_norm from pixel coordinates (%dx%d)", width, height)
+            except Exception:
+                pass
+
             if self.use_fixed_roi_mask and self.cfg.roi_poly_norm is not None:
                 poly_px: List[Tuple[int, int]] = []
                 for xn, yn in (self.cfg.roi_poly_norm or []):
@@ -336,6 +356,26 @@ class StreamingPipeline:
             # 構建負向 ROI 遮罩（若有）
             if self.use_fixed_neg_roi_mask and getattr(self.cfg, "neg_roi_poly_norm", None) is not None:
                 try:
+                    # 若 neg_roi_poly_norm 看起來是像素座標（任何值 > 1），在首次幀自動轉為 normalize
+                    try:
+                        if isinstance(self.cfg.neg_roi_poly_norm, list) and len(self.cfg.neg_roi_poly_norm) > 0:
+                            has_pixel_like2 = False
+                            for xn, yn in (self.cfg.neg_roi_poly_norm or []):
+                                if float(xn) > 1.0 or float(yn) > 1.0:
+                                    has_pixel_like2 = True
+                                    break
+                            if has_pixel_like2 and width > 0 and height > 0:
+                                norm_list2 = []
+                                for xn, yn in (self.cfg.neg_roi_poly_norm or []):
+                                    x_norm = max(0.0, min(1.0, float(xn) / float(width)))
+                                    y_norm = max(0.0, min(1.0, float(yn) / float(height)))
+                                    norm_list2.append((x_norm, y_norm))
+                                self.cfg.neg_roi_poly_norm = norm_list2
+                                self.use_fixed_neg_roi_mask = bool(len(self.cfg.neg_roi_poly_norm) >= 3)
+                                LOGGER.info("auto-normalized neg_roi_poly_norm from pixel coordinates (%dx%d)", width, height)
+                    except Exception:
+                        pass
+
                     poly_px2: List[Tuple[int, int]] = []
                     for xn, yn in (self.cfg.neg_roi_poly_norm or []):
                         x = int(round(float(xn) * float(width)))
