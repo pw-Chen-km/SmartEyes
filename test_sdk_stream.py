@@ -12,6 +12,7 @@ from core.sdk import (
     close_session,
 )
 from core.pipeline import PipelineConfig
+from core.utils import parse_roi_poly_from_str
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,6 +46,18 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use full-frame ROI polygon (1.0 coverage). Recommended if you didn't set SAM points",
     )
+    parser.add_argument(
+        "--roi_px",
+        type=str,
+        default="",
+        help="Pixel ROI polygon points. Accepts JSON like '[[x,y],...]' or flat 'x1 y1 x2 y2 ...'",
+    )
+    parser.add_argument(
+        "--neg_roi_px",
+        type=str,
+        default="",
+        help="Pixel NEG-ROI polygon points. Same format as --roi_px",
+    )
     return parser.parse_args()
 
 
@@ -66,9 +79,21 @@ def main() -> None:
 
     # Prepare config for streaming mode
     roi_poly_norm = None
+    neg_roi_poly_norm = None
     if args.roi_fullframe:
         # Full-frame ROI; if tracker可用，person與ROI重疊將觸發事件
         roi_poly_norm = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+    # 支援從 CLI 直接輸入像素點（首幀會自動normalize）
+    if isinstance(args.roi_px, str) and args.roi_px.strip():
+        try:
+            roi_poly_norm = parse_roi_poly_from_str(args.roi_px)
+        except Exception:
+            roi_poly_norm = roi_poly_norm
+    if isinstance(args.neg_roi_px, str) and args.neg_roi_px.strip():
+        try:
+            neg_roi_poly_norm = parse_roi_poly_from_str(args.neg_roi_px)
+        except Exception:
+            neg_roi_poly_norm = neg_roi_poly_norm
 
     cfg = PipelineConfig(
         input_path=args.video,  # streaming 模式下不使用，但欄位必填
@@ -96,6 +121,7 @@ def main() -> None:
         mask_mode="keep",
         draw_sam=True,
         roi_poly_norm=roi_poly_norm,
+        neg_roi_poly_norm=neg_roi_poly_norm,
         precheck_enabled=True,
         precheck_scale=2.0,
     )
