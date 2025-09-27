@@ -46,7 +46,7 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--track-interval", type=int, default=1, help="每 N 幀執行一次追蹤")
     p.add_argument("--vlm-backend", choices=["qwen", "gemini"], default="qwen", help="選擇視覺語言模型後端")
     p.add_argument("--crop-k2", action="store_true", help="啟用 k1/k2 影格裁切（以 ROI∩分割外擴）")
-    p.add_argument("--crop-margin", type=float, default=0.2, help="裁切外擴像素數（例如 0.5 = 50px 外擴）")
+    p.add_argument("--crop-margin", type=float, default=0.17, help="裁切外擴像素數（例如 0.5 = 50px 外擴）")
     p.add_argument("--crop-min-size", type=int, default=50, help="裁切最小邊長（像素）")
     p.add_argument("--crop-max-size", type=int, default=1000, help="裁切最大邊長（像素）")
     p.add_argument("--crop-square", action="store_true", help="裁切時嘗試趨近正方形")

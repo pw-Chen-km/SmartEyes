@@ -712,7 +712,7 @@ class VisualMonitoringPipeline:
         contact_active = False
         kbuf = ReasoningKeyframeBuffer()
         k1_collected = False
-        k2_sample_frames = [1,2]
+        k2_sample_frames = [1,10,25]
         k2_sample_count = 0
         post_leaving_frame_counter = 0
         k1_crop_center = None

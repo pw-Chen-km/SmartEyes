@@ -22,7 +22,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--video",
         type=str,
-        default="/home/jj/PW/SmartEyes_v2/video/Test_vid_Jerry/camera1/p_put1.mp4",
+        default="/Users/patrick/Downloads/SmartEyes_v2/Usman.mp4",
         help="Path to the test video file",
     )
     parser.add_argument(
@@ -112,8 +112,8 @@ def main() -> None:
         no_track=False,  # 若無YOLOE環境，SDK會自動降級為不追蹤（則通常不會觸發事件）
         track_interval=1,
         crop_k2=True,
-        crop_margin_ratio=0.2,
-        crop_min_size=160,
+        crop_margin_ratio=0.17,
+        crop_min_size=100,
         crop_max_size=512,
         crop_square=False,
         vlm_backend="qwen",
