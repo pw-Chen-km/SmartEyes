@@ -301,7 +301,7 @@ class StreamingPipeline:
             self.track_model = None
             return
         try:
-            m = UltralyticsYOLOE(self.cfg.yolo_weights or os.getenv("YOLOE_WEIGHTS", "yoloe-11l-seg.pt"))
+            m = UltralyticsYOLOE(self.cfg.yolo_weights or os.getenv("YOLOE_WEIGHTS", "yoloe-11s-seg.pt"))
             names = ["person", "bottle"]
             try:
                 txt_pe = m.get_text_pe(names)

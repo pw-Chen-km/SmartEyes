@@ -109,7 +109,7 @@ def main() -> None:
         tracker_cfg=None,
         track_conf=0.35,
         batch_size=0,
-        no_track=False,  # 若無YOLOE環境，SDK會自動降級為不追蹤（則通常不會觸發事件）
+        no_track=True,  # 若無YOLOE環境，SDK會自動降級為不追蹤（則通常不會觸發事件）
         track_interval=1,
         crop_k2=True,
         crop_margin_ratio=0.17,
