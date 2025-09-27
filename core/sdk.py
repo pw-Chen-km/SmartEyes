@@ -301,7 +301,7 @@ class StreamingPipeline:
             self.track_model = None
             return
         try:
-            m = UltralyticsYOLOE(self.cfg.yolo_weights or os.getenv("YOLOE_WEIGHTS", "yoloe-11s-seg.pt"))
+            m = UltralyticsYOLOE(self.cfg.yolo_weights or os.getenv("YOLOE_WEIGHTS", "yoloe-11l-seg.pt"))
             names = ["person", "bottle"]
             try:
                 txt_pe = m.get_text_pe(names)
@@ -786,8 +786,8 @@ class StreamingPipeline:
 
             prompt = (
                 "k1: hand touches ROI. "
-                "k2: hand leaves ROI (two consecutive frames after leaving). "
-                " check if the hand reaching into ROI and takes a new item from ROI. "
+                "k2: hand leaves ROI ( consecutive frames after leaving). "
+                " check if the hand reaching into ROI and takes a new item from ROI (Observed from k2 frames). "
                 "If yes, answer YES. "
                 "If not, answer NO. "
                 "If unsure, answer UNSURE. "

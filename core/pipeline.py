@@ -40,8 +40,8 @@ class PipelineConfig:
     points: List[Tuple[int, int]]
     labels: List[int]
     iou_threshold: float = 0.0
-    trigger_frames: int = 15
-    leave_patience: int = 30
+    trigger_frames: int = 5
+    leave_patience: int = 25
     show_window: bool = False
     yolo_weights: Optional[str] = None
     tracker_cfg: Optional[str] = None
@@ -66,6 +66,8 @@ class PipelineConfig:
     precheck_enabled: bool = True
     # Precheck 影像裁切相對於 dispatch 放大比例（例如 1.2 表示放大 20%）
     precheck_scale: float = 2
+    # 以追蹤 id 為單位管理事件（僅供 StreamingPipeline 使用；預設 false 保持舊行為）
+    track_ids: bool = False
 
 
 class VisualMonitoringPipeline:
@@ -189,7 +191,7 @@ class VisualMonitoringPipeline:
             self.track_model = None
             return
         try:
-            m = UltralyticsYOLOE(self.cfg.yolo_weights or os.getenv("YOLOE_WEIGHTS", "yoloe-11s-seg.pt"))
+            m = UltralyticsYOLOE(self.cfg.yolo_weights or os.getenv("YOLOE_WEIGHTS", "yoloe-11l-seg.pt"))
             names = ["person", "bottle"]
             try:
                 txt_pe = m.get_text_pe(names)
@@ -1039,11 +1041,11 @@ class VisualMonitoringPipeline:
                         LOGGER.exception("Failed to save k1/k2 debug images")
                     prompt = (
                         "k1: hand touches ROI. "
-                        "k2: hand leaves ROI (two consecutive frames after leaving). "
-                        " check if the hand reaching into ROI and takes a new item from ROI. "
+                        "k2: hand leaves ROI ( consecutive frames after leaving). "
+                        " check if the hand reaching into ROI and takes a new item from ROI(observed from K2 frames,). "
                         "If yes, answer YES. "
                         "If not, answer NO. "
-                        "If unsure, answer UNSURE. "
+                        "If unsure, answer NO. "
                         "Output one word only."
                     )
                     try:
