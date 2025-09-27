@@ -98,7 +98,7 @@ class ReasoningEngine:
                 img = self._to_pil_image(frame)
                 img_path = os.path.join(temp_dir, f"frame_{idx:04d}.jpg")
                 img.save(img_path, format="JPEG", quality=90)
-                uris.append(Path(img_path).absolute().as_uri())
+                uris.append(os.path.abspath(img_path))
             except Exception:
                 continue
 

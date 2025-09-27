@@ -112,7 +112,7 @@ class StreamingPipeline:
         self._contact_active: bool = False
         self._kbuf = ReasoningKeyframeBuffer()
         self._k1_collected: bool = False
-        self._k2_sample_frames: List[int] = [1, 2]
+        self._k2_sample_frames: List[int] = [1, 10,25]
         self._k2_sample_count: int = 0
         self._post_leaving_frame_counter: int = 0
         self._k1_crop_center: Optional[Tuple[int, int]] = None
