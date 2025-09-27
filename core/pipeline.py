@@ -710,7 +710,7 @@ class VisualMonitoringPipeline:
         contact_active = False
         kbuf = ReasoningKeyframeBuffer()
         k1_collected = False
-        k2_sample_frames = [1,2]
+        k2_sample_frames = [1,5,15]
         k2_sample_count = 0
         post_leaving_frame_counter = 0
         k1_crop_center = None
@@ -1039,8 +1039,8 @@ class VisualMonitoringPipeline:
                         LOGGER.exception("Failed to save k1/k2 debug images")
                     prompt = (
                         "k1: hand touches ROI. "
-                        "k2: hand leaves ROI (two consecutive frames after leaving). "
-                        " check if the hand reaching into ROI and takes a new item from ROI. "
+                        "k2: hand leaves ROI ( consecutive frames after leaving). "
+                        " check if the hand reaching into ROI and takes a new item from ROI(observed from K2 frames compared to k1,). "
                         "If yes, answer YES. "
                         "If not, answer NO. "
                         "If unsure, answer UNSURE. "
