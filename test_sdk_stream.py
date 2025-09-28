@@ -112,8 +112,8 @@ def main() -> None:
         no_track=False,  # 若無YOLOE環境，SDK會自動降級為不追蹤（則通常不會觸發事件）
         track_interval=1,
         crop_k2=True,
-        crop_margin_ratio=0.17,
-        crop_min_size=100,
+        crop_margin_ratio=0.15,
+        crop_min_size=50,
         crop_max_size=512,
         crop_square=False,
         vlm_backend="qwen",
