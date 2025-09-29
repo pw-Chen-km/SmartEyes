@@ -51,8 +51,8 @@ class PipelineConfig:
     track_interval: int = 1
     crop_k2: bool = True
     crop_margin_ratio: float = 0.2
-    crop_min_size: int = 160
-    crop_max_size: int = 512
+    crop_min_size: int = 300
+    crop_max_size: int = 300
     crop_square: bool = False
     vlm_backend: str = "qwen"
     person_mask: bool = False
@@ -66,6 +66,9 @@ class PipelineConfig:
     precheck_enabled: bool = True
     # Precheck 影像裁切相對於 dispatch 放大比例（例如 1.2 表示放大 20%）
     precheck_scale: float = 2
+    # Actor 追蹤（以 tracking ID 為主）離開判定設定
+    actor_leave_enabled: bool = True
+    actor_leave_patience: int = 3
 
 
 class VisualMonitoringPipeline:
@@ -108,6 +111,9 @@ class VisualMonitoringPipeline:
         # 事件彙總日誌相關
         self._debug_dir: Optional[str] = None
         self._current_event_index: int = 0
+        # Actor 追蹤 ID 與離開計數器（簡化：僅追蹤 ID，不追 centroid/area）
+        self._actor_track_id: Optional[int] = None
+        self._actor_leave_counter: int = 0
 
     # --- UI 面板 ---
     def _set_panel(self, mode: str, message: str) -> None:
@@ -326,6 +332,26 @@ class VisualMonitoringPipeline:
             return (nx1, ny1, nx2, ny2)
         except Exception:
             return box_xyxy
+
+    def _bbox_iou(self, a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> float:
+        try:
+            ax1, ay1, ax2, ay2 = a
+            bx1, by1, bx2, by2 = b
+            ix1 = max(ax1, bx1)
+            iy1 = max(ay1, by1)
+            ix2 = min(ax2, bx2)
+            iy2 = min(ay2, by2)
+            iw = max(0, ix2 - ix1)
+            ih = max(0, iy2 - iy1)
+            inter = iw * ih
+            if inter <= 0:
+                return 0.0
+            area_a = max(0, ax2 - ax1) * max(0, ay2 - ay1)
+            area_b = max(0, bx2 - bx1) * max(0, by2 - by1)
+            denom = float(area_a + area_b - inter) if (area_a + area_b - inter) > 0 else 1.0
+            return float(inter) / denom
+        except Exception:
+            return 0.0
 
     # --- K1/K2 前置檢查（使用同一個 prompt 檢查 k1 與 k2；兩者皆 YES 才通過） ---
     def _precheck_k1(self, k1_img: Optional[np.ndarray]) -> bool:
@@ -783,14 +809,16 @@ class VisualMonitoringPipeline:
                 # 主要 ROI 的 overlap
                 max_overlap = 0.0
                 best_poly = None
+                best_idx = -1
                 polys = None
                 if r is not None and sam_bin is not None:
                     polys = yolo_polys_from_result(r)
-                    for poly in polys:
+                    for i, poly in enumerate(polys):
                         ov = overlap_ratio_poly_with_mask(poly, sam_bin, width, height)
                         if ov > max_overlap:
                             max_overlap = ov
                             best_poly = poly
+                            best_idx = i
 
                 # 負向 ROI 的 overlap（若提供）
                 neg_overlap = 0.0
@@ -873,9 +901,133 @@ class VisualMonitoringPipeline:
                                         # 不應用 person mask，直接使用 crop 後的圖片
                                         kbuf.replace_last("k1", cropped)
                                         k1_crop_center = (cx, cy)
+                                        # 在 K1 當下鎖定 Actor tracking ID（若可用）
+                                        try:
+                                            if self.cfg.actor_leave_enabled and r is not None and best_idx >= 0:
+                                                boxes = getattr(r, "boxes", None)
+                                                ids = getattr(boxes, "id", None) if boxes is not None else None
+                                                if ids is not None:
+                                                    try:
+                                                        ids_arr = ids.cpu().numpy() if hasattr(ids, "cpu") else np.asarray(ids)
+                                                    except Exception:
+                                                        ids_arr = np.asarray(ids)
+                                                    if ids_arr is not None and ids_arr.size > best_idx:
+                                                        try:
+                                                            self._actor_track_id = int(ids_arr[best_idx])
+                                                            self._actor_leave_counter = 0
+                                                        except Exception:
+                                                            self._actor_track_id = None
+                                                            self._actor_leave_counter = 0
+                                            else:
+                                                self._actor_track_id = None
+                                                self._actor_leave_counter = 0
+                                        except Exception:
+                                            self._actor_track_id = None
+                                            self._actor_leave_counter = 0
                         except Exception:
                             pass
                         k1_collected = True
+
+                    # 使用 tracking ID 的 Actor 離開判定（即使仍有人在 ROI 也可觸發 K2）
+                    try:
+                        if self.cfg.actor_leave_enabled and k1_collected:
+                            actor_overlap = None
+                            if self._actor_track_id is not None and r is not None and sam_bin is not None:
+                                try:
+                                    boxes = getattr(r, "boxes", None)
+                                    ids = getattr(boxes, "id", None) if boxes is not None else None
+                                    if ids is not None:
+                                        try:
+                                            ids_arr = ids.cpu().numpy() if hasattr(ids, "cpu") else np.asarray(ids)
+                                        except Exception:
+                                            ids_arr = np.asarray(ids)
+                                        idx_list = []
+                                        try:
+                                            # 支援多個同 ID（理論上只取第一個）
+                                            for i in range(int(ids_arr.shape[0])):
+                                                try:
+                                                    if int(ids_arr[i]) == int(self._actor_track_id):
+                                                        idx_list.append(i)
+                                                except Exception:
+                                                    continue
+                                        except Exception:
+                                            idx_list = []
+                                        target_idx = idx_list[0] if len(idx_list) > 0 else -1
+                                        if target_idx >= 0:
+                                            # 取該 idx 的 polygon（若無 mask，改用 bbox 近似多邊形）
+                                            poly_pts = None
+                                            try:
+                                                masks = getattr(r, "masks", None)
+                                                xy = getattr(masks, "xy", None) if masks is not None else None
+                                                if isinstance(xy, list) and target_idx < len(xy):
+                                                    arr = np.asarray(xy[target_idx])
+                                                    if arr.ndim == 2 and arr.shape[1] >= 2:
+                                                        poly_pts = [(int(p[0]), int(p[1])) for p in arr]
+                                            except Exception:
+                                                poly_pts = None
+                                            if poly_pts is None:
+                                                try:
+                                                    xyxy = getattr(boxes, "xyxy", None)
+                                                    if xyxy is not None:
+                                                        arr = xyxy.cpu().numpy() if hasattr(xyxy, "cpu") else np.asarray(xyxy)
+                                                        if arr.size >= (target_idx + 1) * 4:
+                                                            b = arr[target_idx]
+                                                            x1, y1, x2, y2 = int(b[0]), int(b[1]), int(b[2]), int(b[3])
+                                                            poly_pts = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+                                                except Exception:
+                                                    poly_pts = None
+                                            if isinstance(poly_pts, list) and len(poly_pts) >= 3:
+                                                actor_overlap = overlap_ratio_poly_with_mask(poly_pts, sam_bin, width, height)
+                                except Exception:
+                                    pass
+                            # 若無法取得 actor_overlap，視為 0
+                            if actor_overlap is None:
+                                actor_overlap = 0.0
+                            # 低於門檻則累計離開計數，反之歸零
+                            if actor_overlap < max(0.0, float(self.cfg.iou_threshold)):
+                                self._actor_leave_counter += 1
+                            else:
+                                self._actor_leave_counter = 0
+                            # 連續不足門檻達到耐心值：進入 post_leaving，提前觸發 K2
+                            if self._actor_leave_counter >= int(max(1, self.cfg.actor_leave_patience)):
+                                contact_active = False
+                                k2_sample_count = 0
+                                # 優先沿用 k1 的裁切框
+                                try:
+                                    if self.cfg.crop_k2:
+                                        if self._k1_crop_box is not None:
+                                            x1, y1, x2, y2 = self._k1_crop_box
+                                            x1 = max(0, min(x1, width)); x2 = max(0, min(x2, width))
+                                            y1 = max(0, min(y1, height)); y2 = max(0, min(y2, height))
+                                            if x2 > x1 and y2 > y1:
+                                                k2_crop_box = (x1, y1, x2, y2)
+                                            else:
+                                                k2_crop_box = None
+                                        elif k1_crop_center is not None:
+                                            cx, cy = k1_crop_center
+                                            base_size = 100
+                                            margin_px = int(min(width, height) * self.cfg.crop_margin_ratio)
+                                            cw = min(self.cfg.crop_max_size, max(self.cfg.crop_min_size, base_size + margin_px * 2))
+                                            ch = cw if self.cfg.crop_square else min(self.cfg.crop_max_size, max(self.cfg.crop_min_size, base_size + margin_px * 2))
+                                            x1 = max(0, cx - cw // 2)
+                                            y1 = max(0, cy - ch // 2)
+                                            x2 = min(width, x1 + cw)
+                                            y2 = min(height, y1 + ch)
+                                            if x2 > x1 and y2 > y1:
+                                                k2_crop_box = (x1, y1, x2, y2)
+                                            else:
+                                                k2_crop_box = None
+                                    else:
+                                        k2_crop_box = None
+                                except Exception:
+                                    k2_crop_box = None
+                                state = "post_leaving"
+                                post_leaving_frame_counter = 0
+                                # 清理 actor 狀態
+                                self._actor_leave_counter = 0
+                                # 保持 _actor_track_id 以便除錯；可選擇清空
+                    except Exception:
+                        pass
 
                     if not event and contact_active:
                         contact_active = False
@@ -920,6 +1072,7 @@ class VisualMonitoringPipeline:
                         if trigger.is_negative_violated(neg_overlap):
                             kbuf.reset(); state = "idle"; contact_active = False; k1_collected = False
                             trigger.reset(); person_missing_frames = 0; k2_sample_count = 0; k2_crop_box = None
+                            self._actor_track_id = None; self._actor_leave_counter = 0
                             event_index += 1; self._current_event_index = event_index
                             continue
                     except Exception:
@@ -1007,32 +1160,30 @@ class VisualMonitoringPipeline:
                                             pass
                             except Exception:
                                 pass
-                            # 濾掉此次事件
+                            # 濾掉此次事件並重置狀態
                             kbuf.reset()
-                            state = "idle"; contact_active = False
-                            k1_collected = False
+                            state = "idle"; contact_active = False; k1_collected = False
                             trigger.reset()
                             person_missing_frames = 0
                             k2_sample_count = 0
                             k2_crop_box = None
+                            self._actor_track_id = None; self._actor_leave_counter = 0
                             event_index += 1
                             self._current_event_index = event_index
                             continue
-                        else:
-                            # precheck 通過：frames_for_vlm 已是乾淨版，無需再替換
-                            pass
                     except Exception:
                         # 任意錯誤也視為不通過，避免誤報
                         kbuf.reset()
-                        state = "idle"; contact_active = False
-                        k1_collected = False
+                        state = "idle"; contact_active = False; k1_collected = False
                         trigger.reset()
                         person_missing_frames = 0
                         k2_sample_count = 0
                         k2_crop_box = None
+                        self._actor_track_id = None; self._actor_leave_counter = 0
                         event_index += 1
                         self._current_event_index = event_index
                         continue
+
                     try:
                         save_kframes(debug_dir, stem, event_index, frames_for_vlm)
                     except Exception:
@@ -1040,7 +1191,7 @@ class VisualMonitoringPipeline:
                     prompt = (
                         "k1: hand touches cabinet. "
                         "k2: hand withdraw cabinet ( consecutive frames after withdraw). "
-                        " From your observation from k1, k2, check if the hand reaching into cabinet and takes a new item from cabinet(check if there is item holded in any of the k2 frames). "
+                        "From your observation from k1, k2, check if the hand reaching into cabinet and takes a new item from cabinet(check if there is item holded in any of the k2 frames). "
                         "If yes, answer YES. "
                         "If not, answer NO. "
                         "If unsure, answer UNSURE. "
@@ -1059,13 +1210,14 @@ class VisualMonitoringPipeline:
                             })
                     except Exception:
                         LOGGER.exception("enqueue VLM task failed")
+                    # 事件完成後統一重置
                     kbuf.reset()
-                    state = "idle"; contact_active = False
-                    k1_collected = False
+                    state = "idle"; contact_active = False; k1_collected = False
                     trigger.reset()
                     person_missing_frames = 0
                     k2_sample_count = 0
                     k2_crop_box = None
+                    self._actor_track_id = None; self._actor_leave_counter = 0
                     event_index += 1
                     self._current_event_index = event_index
                     # 清理對應幀暫存
