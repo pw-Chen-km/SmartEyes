@@ -45,24 +45,68 @@ class Orchestrator:
                 try:
                     frames_for_vlm = task.get("frames", [])
                     prompt = task.get("prompt", "")
-                    result = self.reasoning.analyze_keyframes(frames_for_vlm, prompt=prompt)
-                    # 夾帶任務的 metadata（如 event_index, debug_dir）回傳給 callback
-                    try:
-                        if isinstance(result, dict):
-                            if "event_index" not in result and "event_index" in task:
-                                result["event_index"] = task.get("event_index")
-                            if "debug_dir" not in result and "debug_dir" in task:
-                                result["debug_dir"] = task.get("debug_dir")
-                            if "k1k2_path" not in result and "k1k2_path" in task:
-                                result["k1k2_path"] = task.get("k1k2_path")
-                    except Exception:
-                        pass
-                    cb = self._result_callback
-                    if cb is not None:
+                    task_type = str(task.get("task_type", "vlm") or "vlm").lower()
+
+                    if task_type == "precheck":
+                        # 背景 precheck：通過才轉投 VLM 任務
+                        result = self.reasoning.analyze_keyframes(frames_for_vlm, prompt=prompt)
+                        # 解析決策（僅取首詞）
                         try:
-                            cb(result)
+                            summary = str((result or {}).get("summary", ""))
+                            token = (summary.strip().lower().split()[0]) if summary else ""
+                        except Exception:
+                            token = ""
+                            summary = str((result or {}).get("summary", ""))
+
+                        if token in ("yes", "y", "true"):  # precheck 通過
+                            # 先回報一個 precheck_passed 事件給上層
+                            cb = self._result_callback
+                            if cb is not None:
+                                try:
+                                    cb({
+                                        "type": "precheck_passed",
+                                        "event_index": task.get("event_index"),
+                                        "debug_dir": task.get("debug_dir"),
+                                        "k1k2_path": task.get("k1k2_path"),
+                                        "summary": summary,
+                                    })
+                                except Exception:
+                                    pass
+                            # 再把同一批 frames 投遞為 VLM 任務
+                            try:
+                                self._event_queue.put_nowait({
+                                    "task_type": "vlm",
+                                    "frames": frames_for_vlm,
+                                    "prompt": task.get("vlm_prompt", ""),
+                                    "event_index": task.get("event_index"),
+                                    "debug_dir": task.get("debug_dir"),
+                                    "k1k2_path": task.get("k1k2_path"),
+                                })
+                            except Exception:
+                                pass
+                        else:
+                            # precheck 未通過：不再投遞 VLM；可選擇於上層標記為 Filtered
+                            pass
+                    else:
+                        # VLM 任務（原行為）
+                        result = self.reasoning.analyze_keyframes(frames_for_vlm, prompt=prompt)
+                        # 夾帶任務的 metadata（如 event_index, debug_dir）回傳給 callback
+                        try:
+                            if isinstance(result, dict):
+                                if "event_index" not in result and "event_index" in task:
+                                    result["event_index"] = task.get("event_index")
+                                if "debug_dir" not in result and "debug_dir" in task:
+                                    result["debug_dir"] = task.get("debug_dir")
+                                if "k1k2_path" not in result and "k1k2_path" in task:
+                                    result["k1k2_path"] = task.get("k1k2_path")
                         except Exception:
                             pass
+                        cb = self._result_callback
+                        if cb is not None:
+                            try:
+                                cb(result)
+                            except Exception:
+                                pass
                 except Exception:
                     pass
                 finally:

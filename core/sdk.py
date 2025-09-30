@@ -492,6 +492,23 @@ class StreamingPipeline:
 
     def _result_callback(self, res: Dict[str, Any]) -> None:
         try:
+            # 特殊：背景 precheck 通過事件
+            try:
+                if isinstance(res, dict) and str(res.get("type", "")) == "precheck_passed":
+                    evt = Event(
+                        type="precheck_passed",
+                        event_index=int(res.get("event_index", 0) or 0),
+                        decision="",
+                        summary=str(res.get("summary", "")),
+                        k1k2_path=str(res.get("k1k2_path", "") or ""),
+                        debug_dir=str(res.get("debug_dir", "") or ""),
+                        timestamp_ms=float(time.time() * 1000.0),
+                    )
+                    self._emitted_events.append(evt)
+                    return
+            except Exception:
+                pass
+
             summary = (res or {}).get("summary") or ""
             self.current_vlm_text = str(summary)
             self.vlm_has_output = True
@@ -741,7 +758,7 @@ class StreamingPipeline:
                 self._state = "dispatch"
             return
 
-        # dispatch：precheck 與投遞 VLM
+        # dispatch：改為「先丟背景 precheck，通過才由 worker 投遞 VLM」
         if self._state == "dispatch":
             frames_for_vlm = self._kbuf.collect(max_k1=1, max_k2=3, max_k3=0)
 
@@ -751,66 +768,11 @@ class StreamingPipeline:
                 pass
 
             try:
-                k1_img = frames_for_vlm[0] if len(frames_for_vlm) > 0 else None
-                k2_img = frames_for_vlm[1] if len(frames_for_vlm) > 1 else None
-                pre_k1 = k1_img
-                pre_k2 = k2_img
-                try:
-                    if self._k1_crop_box is not None and isinstance(self._last_frame_bgr_k1, np.ndarray):
-                        eb1 = self._expand_box(self._k1_crop_box, float(getattr(self.cfg, "precheck_scale", 1.2)), width, height)
-                        pre_k1 = crop_by_box(self._last_frame_bgr_k1, eb1)
-                except Exception:
-                    pass
-                try:
-                    if self._k2_crop_box is not None and isinstance(self._last_frame_bgr_k2, np.ndarray):
-                        base_k2 = self._first_frame_bgr_k2 if isinstance(self._first_frame_bgr_k2, np.ndarray) else self._last_frame_bgr_k2
-                        if isinstance(base_k2, np.ndarray):
-                            eb2 = self._expand_box(self._k2_crop_box, float(getattr(self.cfg, "precheck_scale", 1.2)), width, height)
-                            pre_k2 = crop_by_box(base_k2, eb2)
-                except Exception:
-                    pass
-
-                pre_ok = self._precheck_k1k2(pre_k1, pre_k2)
-                try:
-                    pc = getattr(self, "_last_precheck", None)
-                    if isinstance(pc, dict):
-                        _ = save_precheck_log(self._debug_dir, self._current_event_index,
-                                              str(pc.get("k1_summary", "")), str(pc.get("k1_decision", "")),
-                                              str(pc.get("k2_summary", "")), str(pc.get("k2_decision", "")))
-                        _ = save_precheck_images(self._debug_dir, self._current_event_index,
-                                                 pc.get("k1_img"), pc.get("k2_img"))
-                except Exception:
-                    pass
-
-                if not pre_ok:
-                    try:
-                        frames_for_fail = []
-                        if k1_img is not None:
-                            frames_for_fail.append(k1_img)
-                        if k2_img is not None:
-                            frames_for_fail.append(k2_img)
-                        if len(frames_for_fail) >= 2:
-                            save_kframes(self._debug_dir, self._stem, self._current_event_index, frames_for_fail)
-                            from .output import annotate_image_file
-                            k1k2_path_fail = os.path.join(self._debug_dir or "", f"{self._stem}_e{self._current_event_index}_k1k2.jpg")
-                            if os.path.isfile(k1k2_path_fail):
-                                try:
-                                    annotate_image_file(k1k2_path_fail, "Filtered", color=(0, 0, 255))
-                                except Exception:
-                                    pass
-                    except Exception:
-                        pass
-                    self._reset_after_event()
-                    return
-            except Exception:
-                self._reset_after_event()
-                return
-
-            try:
                 save_kframes(self._debug_dir, self._stem, self._current_event_index, frames_for_vlm)
             except Exception:
                 LOGGER.exception("Failed to save k1/k2 debug images")
 
+            # VLM 提示詞（保持原本）
             prompt = (
                 "k1: hand touches ROI. "
                 "k2: hand leaves ROI ( consecutive frames after leaving). "
@@ -821,26 +783,30 @@ class StreamingPipeline:
                 "Output one word only."
             )
 
+            # precheck 提示詞（沿用原同步版 precheck 規則）
+            pre_prompt = (
+                "任務：判斷這兩張圖像（K1=觸發瞬間，K2=解除瞬間）是否顯示「此人明確與ROI櫃子互動」（例如開門、拿取、放置）。"
+                "條件："
+                "- 必須看到手明確接觸或操作cabinet，且K1→K2能解釋為一次連續行為。"
+                "- 只要沒看到手伸向roi都算no。"
+                "- 不確定回答no。"
+                "只允許輸出一個詞："
+                "yes 或 no"
+            )
+
             try:
                 if self.orch is not None:
                     k1k2_path = os.path.join(self._debug_dir or "", f"{self._stem}_e{self._current_event_index}_k1k2.jpg")
+                    # 先丟背景 precheck，通過後由 worker 再投 VLM
                     self.orch._event_queue.put_nowait({
+                        "task_type": "precheck",
                         "frames": frames_for_vlm,
-                        "prompt": prompt,
+                        "prompt": pre_prompt,
+                        "vlm_prompt": prompt,
                         "event_index": int(self._current_event_index),
                         "debug_dir": str(self._debug_dir or ""),
                         "k1k2_path": k1k2_path,
                     })
-                    # 立即發出一個 precheck 通過事件
-                    self._emitted_events.append(Event(
-                        type="precheck_passed",
-                        event_index=int(self._current_event_index),
-                        decision="",
-                        summary="",
-                        k1k2_path=k1k2_path,
-                        debug_dir=str(self._debug_dir or ""),
-                        timestamp_ms=float(time.time() * 1000.0),
-                    ))
             except Exception:
                 LOGGER.exception("enqueue VLM task failed")
 
