@@ -5,6 +5,7 @@ from typing import Callable, Dict, List, Optional, Tuple, Any
 import os
 import time
 import logging
+import threading
 
 import cv2
 import numpy as np
@@ -767,10 +768,17 @@ class StreamingPipeline:
             except Exception:
                 pass
 
+            # 將保存 k1/k2 調試圖改為背景執行，避免阻塞主循環
             try:
-                save_kframes(self._debug_dir, self._stem, self._current_event_index, frames_for_vlm)
+                def _bg_save(debug_dir, stem, idx, frames):
+                    try:
+                        save_kframes(debug_dir, stem, idx, frames)
+                    except Exception:
+                        LOGGER.exception("Failed to save k1/k2 debug images")
+                th = threading.Thread(target=_bg_save, args=(self._debug_dir, self._stem, self._current_event_index, frames_for_vlm), daemon=True)
+                th.start()
             except Exception:
-                LOGGER.exception("Failed to save k1/k2 debug images")
+                pass
 
             # VLM 提示詞（保持原本）
             prompt = (
