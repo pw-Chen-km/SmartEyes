@@ -22,13 +22,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--video",
         type=str,
-        default="/Users/patrick/Downloads/SmartEyes_v2/Usman.mp4",
+        default="/home/jj/PW/SmartEyes/Usman.mp4",
         help="Path to the test video file",
     )
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="/home/jj/PW/SmartEyes_v2/outputs",
+        default="/home/jj/PW/SmartEyes/outputs",
         help="Directory to store outputs (k_img/, video/)",
     )
     parser.add_argument(
@@ -113,14 +113,14 @@ def main() -> None:
         track_interval=1,
         crop_k2=True,
         crop_margin_ratio=0.15,
-        crop_min_size=50,
-        crop_max_size=512,
+        crop_min_size=300,
+        crop_max_size=300,
         crop_square=False,
         vlm_backend="qwen",
         person_mask=False,
         mask_mode="keep",
         draw_sam=True,
-        roi_poly_norm=roi_poly_norm,
+        roi_poly_norm=[[264, 122], [277, 169], [284, 350], [264, 334], [261, 129]],
         neg_roi_poly_norm=neg_roi_poly_norm,
         precheck_enabled=True,
         precheck_scale=2.0,

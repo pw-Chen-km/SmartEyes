@@ -50,9 +50,9 @@ class PipelineConfig:
     no_track: bool = False
     track_interval: int = 1
     crop_k2: bool = True
-    crop_margin_ratio: float = 0.2
-    crop_min_size: int = 300
-    crop_max_size: int = 300
+    crop_margin_ratio: float = 0.3
+    crop_min_size: int = 800
+    crop_max_size: int = 800
     crop_square: bool = False
     vlm_backend: str = "qwen"
     person_mask: bool = False
@@ -114,6 +114,8 @@ class VisualMonitoringPipeline:
         # Actor 追蹤 ID 與離開計數器（簡化：僅追蹤 ID，不追 centroid/area）
         self._actor_track_id: Optional[int] = None
         self._actor_leave_counter: int = 0
+        # red 狀態維持幀數倒數（60 幀後自動恢復 monitoring）
+        self._red_cooldown_frames: int = 0
 
     # --- UI 面板 ---
     def _set_panel(self, mode: str, message: str) -> None:
@@ -125,6 +127,14 @@ class VisualMonitoringPipeline:
             # 事件級更新：當面板狀態改變時發送事件（僅文字/顏色，不含影格）
             try:
                 self._emit_ui_event(color=mode, message=self.panel_message, vlm_text=self.current_vlm_text)
+            except Exception:
+                pass
+            # 進入 red 時啟動 60 幀倒數；其他狀態則清除倒數
+            try:
+                if mode == "red":
+                    self._red_cooldown_frames = 60
+                else:
+                    self._red_cooldown_frames = 0
             except Exception:
                 pass
         except Exception:
@@ -379,11 +389,13 @@ class VisualMonitoringPipeline:
                 return False
 
             k1_prompt = (
-                "You are a surveillance system looking. The cabinet is the ROI. "
-                "If a person is interacting  with the  ROI, answer YES; "
-                "otherwise answer NO. Output YES or NO only."
+                "任務：判斷這兩張圖像（K1=觸發瞬間，K2=解除瞬間）是否顯示「此人明確與ROI櫃子互動」（例如開門、拿取、放置）。"
+                "條件："
+                "- 必須看到手明確接觸或操作ROI，且K1→K2能解釋為一次連續行為。"
+                "- 只要沒有手伸向cabinet的都算no。"
+                "只允許輸出一個詞："
+                "yes 或 no"
             )
-
             r1 = self.orch.reasoning.analyze_keyframes([k1_in], prompt=k1_prompt)
             d1 = self._parse_decision(str(r1.get("summary", "")))
             # 簡潔記錄（僅在啟用 precheck 時）
@@ -430,8 +442,7 @@ class VisualMonitoringPipeline:
                 "任務：判斷這兩張圖像（K1=觸發瞬間，K2=解除瞬間）是否顯示「此人明確與ROI櫃子互動」（例如開門、拿取、放置）。"
                 "條件："
                 "- 必須看到手明確接觸或操作ROI，且K1→K2能解釋為一次連續行為。"
-                "- 單純路過、擦到、掠過、模糊不清都算no。"
-                "- 不確定回答yes。"
+                "- 只要沒有手伸向cabinet的都算no。"
                 "只允許輸出一個詞："
                 "yes 或 no"
             )
@@ -1236,6 +1247,15 @@ class VisualMonitoringPipeline:
                 out_frame = put_text_bottom_right(cv2.cvtColor(base_bgr, cv2.COLOR_BGR2RGB), text)
                 out_frame_bgr = cv2.cvtColor(out_frame, cv2.COLOR_RGB2BGR)
                 writer.write(out_frame_bgr)
+                # red 狀態維持 60 幀後自動回到 monitoring（none）
+                try:
+                    if self.panel_mode == "red":
+                        if self._red_cooldown_frames > 0:
+                            self._red_cooldown_frames -= 1
+                        else:
+                            self._set_panel("none", "")
+                except Exception:
+                    pass
                 # 心跳事件：每 ~0.5 秒推送一次目前面板狀態，避免 UI 無事件時不更新
                 try:
                     now_ts = time.time()

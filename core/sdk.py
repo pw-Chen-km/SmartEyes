@@ -119,6 +119,8 @@ class StreamingPipeline:
         self._person_missing_frames: int = 0
         self._person_missing_threshold: int = 10
         self._frame_index: int = 0
+        # red 狀態維持幀數倒數（60 幀後自動恢復 monitoring）
+        self._red_cooldown_frames: int = 0
 
         # precheck 暫存
         self._last_precheck: Dict[str, Any] = {}
@@ -244,6 +246,16 @@ class StreamingPipeline:
         except Exception:
             pass
 
+        # red 狀態維持 60 幀後自動回到 monitoring（none）
+        try:
+            if self.panel_mode == "red":
+                if self._red_cooldown_frames > 0:
+                    self._red_cooldown_frames -= 1
+                else:
+                    self._set_panel("none", "")
+        except Exception:
+            pass
+
         # 將累積 callback 事件打包返回，並清空暫存
         events = self._emitted_events
         self._emitted_events = []
@@ -301,7 +313,7 @@ class StreamingPipeline:
             self.track_model = None
             return
         try:
-            m = UltralyticsYOLOE(self.cfg.yolo_weights or os.getenv("YOLOE_WEIGHTS", "yoloe-11s-seg.pt"))
+            m = UltralyticsYOLOE(self.cfg.yolo_weights or os.getenv("YOLOE_WEIGHTS", "yoloe-11l-seg.pt"))
             names = ["person", "bottle"]
             try:
                 txt_pe = m.get_text_pe(names)
@@ -463,6 +475,14 @@ class StreamingPipeline:
                 return
             self.panel_mode = mode
             self.panel_message = str(message or "")
+            # 進入 red 時啟動 60 幀倒數；其他狀態則清除倒數
+            try:
+                if mode == "red":
+                    self._red_cooldown_frames = 60
+                else:
+                    self._red_cooldown_frames = 0
+            except Exception:
+                pass
             try:
                 self._emit_ui_event(color=mode, message=self.panel_message, vlm_text=self.current_vlm_text)
             except Exception:
@@ -700,6 +720,13 @@ class StreamingPipeline:
                     frame_to_add = frame_bgr
                     if self.cfg.crop_k2 and self._k2_crop_box is not None:
                         eb = self._k2_crop_box
+                        # 若是最後一針 K2，依 precheck_scale 放大一次（僅用於此次裁切，不覆寫 _k2_crop_box）
+                        try:
+                            if (self._k2_sample_count + 1) == len(self._k2_sample_frames):
+                                s = float(getattr(self.cfg, "precheck_scale", 1.2))
+                                eb = self._expand_box(eb, s, width, height)
+                        except Exception:
+                            pass
                         cropped = crop_by_box(frame_bgr, eb)
                         self._last_frame_bgr = frame_bgr.copy() if self._last_frame_bgr is None else self._last_frame_bgr
                         if self._k2_sample_count == 0:
@@ -716,7 +743,7 @@ class StreamingPipeline:
 
         # dispatch：precheck 與投遞 VLM
         if self._state == "dispatch":
-            frames_for_vlm = self._kbuf.collect(max_k1=1, max_k2=2, max_k3=0)
+            frames_for_vlm = self._kbuf.collect(max_k1=1, max_k2=3, max_k3=0)
 
             try:
                 frames_for_vlm = self._build_clean_kframes(frames_for_vlm)
@@ -904,9 +931,9 @@ class StreamingPipeline:
             pre_prompt = (
                 "任務：判斷這兩張圖像（K1=觸發瞬間，K2=解除瞬間）是否顯示「此人明確與ROI櫃子互動」（例如開門、拿取、放置）。"
                 "條件："
-                "- 必須看到手明確接觸或操作ROI，且K1→K2能解釋為一次連續行為。"
-                "- 單純路過、擦到、掠過、模糊不清都算no。"
-                "- 不確定回答yes。"
+                "- 必須看到手明確接觸或操作cabinet，且K1→K2能解釋為一次連續行為。"
+                "- 只要沒看到手伸向roi都算no。"
+                "- 不確定回答no。"
                 "只允許輸出一個詞："
                 "yes 或 no"
             )
